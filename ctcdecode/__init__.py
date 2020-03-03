@@ -5,7 +5,7 @@ import torch
 class CTCBeamDecoder(object):
     def __init__(self, labels, model_path=None, alpha=0, beta=0, cutoff_top_n=40, cutoff_prob=1.0, beam_width=100,
                  num_processes=4, blank_id=0, log_probs_input=False):
-        self.cutoff_top_n = cutoff_top_n
+        self._cutoff_top_n = cutoff_top_n
         self._beam_width = beam_width
         self._scorer = None
         self._num_processes = num_processes
@@ -18,6 +18,29 @@ class CTCBeamDecoder(object):
                                                         self._num_labels)
         self._cutoff_prob = cutoff_prob
 
+    def init(self, key):
+        ctc_decode.stream_decoder_init(key, self._labels, self._num_labels, self._beam_width, self._num_processes,
+                                       self._cutoff_prob, self._cutoff_top_n, self._blank_id, self._log_probs, self._scorer)
+    
+    def feed(self, key, probs, seq_len=None):
+        probs = probs.cpu().float()
+        max_seq_len = probs.size(0)
+        if seq_len is None:
+            seq_len = max_seq_len
+        else:
+            seq_len = seq_len.cpu().int()
+        print(type(seq_len), seq_len)
+        output = torch.IntTensor(self._beam_width, max_seq_len).cpu().int()
+        timesteps = torch.IntTensor(self._beam_width, max_seq_len).cpu().int()
+        scores = torch.FloatTensor(self._beam_width).cpu().float()
+        out_seq_len = torch.IntTensor(self._beam_width).cpu().int()
+
+        ctc_decode.stream_decoder_feed(key, probs, 100, output, timesteps, scores, out_seq_len)
+        return output, scores, timesteps, out_seq_len
+
+    def finalize(self, key):
+        ctc_decode.stream_decoder_finalize(key)
+
     def decode(self, probs, seq_lens=None):
         # We expect batch x seq x label_size
         probs = probs.cpu().float()
@@ -26,17 +49,18 @@ class CTCBeamDecoder(object):
             seq_lens = torch.IntTensor(batch_size).fill_(max_seq_len)
         else:
             seq_lens = seq_lens.cpu().int()
+        print(type(seq_lens), seq_lens)
         output = torch.IntTensor(batch_size, self._beam_width, max_seq_len).cpu().int()
         timesteps = torch.IntTensor(batch_size, self._beam_width, max_seq_len).cpu().int()
         scores = torch.FloatTensor(batch_size, self._beam_width).cpu().float()
         out_seq_len = torch.IntTensor(batch_size, self._beam_width).cpu().int()
         if self._scorer:
             ctc_decode.paddle_beam_decode_lm(probs, seq_lens, self._labels, self._num_labels, self._beam_width,
-                                             self._num_processes, self._cutoff_prob, self.cutoff_top_n, self._blank_id,
+                                             self._num_processes, self._cutoff_prob, self._cutoff_top_n, self._blank_id,
                                              self._log_probs ,self._scorer, output, timesteps, scores, out_seq_len)
         else:
             ctc_decode.paddle_beam_decode(probs, seq_lens, self._labels, self._num_labels, self._beam_width, self._num_processes,
-                                          self._cutoff_prob, self.cutoff_top_n, self._blank_id, self._log_probs,
+                                          self._cutoff_prob, self._cutoff_top_n, self._blank_id, self._log_probs,
                                           output, timesteps, scores, out_seq_len)
 
         return output, scores, timesteps, out_seq_len

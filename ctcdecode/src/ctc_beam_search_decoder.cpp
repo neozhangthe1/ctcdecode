@@ -34,10 +34,11 @@ DecoderState::DecoderState(const std::vector<std::string> &vocabulary,
   auto it = std::find(vocabulary.begin(), vocabulary.end(), " ");
   // if no space in vocabulary
   if (it == vocabulary.end()) {
-    space_id = -2;
+    space_id = 0;
   } else {
     space_id = std::distance(vocabulary.begin(), it);
   }
+  printf("space_id %d\n", space_id);
 
   // init prefixes' root
   root.score = root.log_prob_b_prev = 0.0;

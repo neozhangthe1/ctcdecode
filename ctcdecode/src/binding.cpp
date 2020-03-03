@@ -2,10 +2,15 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <map>
 #include <torch/torch.h>
 #include "scorer.h"
 #include "ctc_beam_search_decoder.h"
 #include "utf8.h"
+
+
+std::map<string, DecoderState*> decoder_pool;
+
 
 int utf8_to_utf8_char_vec(const char* labels, std::vector<std::string>& new_vocab) {
     const char* str_i = labels;
@@ -20,6 +25,96 @@ int utf8_to_utf8_char_vec(const char* labels, std::vector<std::string>& new_voca
         new_vocab.push_back(std::string(u));
     }
     while (str_i < end);
+}
+
+int stream_decoder_init(string key,
+                        const char* labels,
+                        int vocab_size,
+                        size_t beam_size,
+                        size_t num_processes,
+                        double cutoff_prob,
+                        size_t cutoff_top_n,
+                        size_t blank_id,
+                        bool log_input,
+                        void *scorer)
+{
+    std::vector<std::string> new_vocab;
+    utf8_to_utf8_char_vec(labels, new_vocab);
+    Scorer *ext_scorer = NULL;
+    if (scorer != NULL) {
+        ext_scorer = static_cast<Scorer *>(scorer);
+    }
+
+    auto decoder = new DecoderState (new_vocab, beam_size, cutoff_prob, cutoff_top_n, blank_id,
+                        log_input, ext_scorer);
+    decoder_pool.insert(std::make_pair(key, decoder));
+    return 1;
+}
+
+int stream_decoder_feed(string key,
+                        at::Tensor th_probs,
+                        int th_seq_len,
+                        at::Tensor th_output,
+                        at::Tensor th_timesteps,
+                        at::Tensor th_scores,
+                        at::Tensor th_out_length)
+{
+    const int64_t max_time = th_probs.size(0);
+    // const int64_t batch_size = th_probs.size(0);
+    const int64_t num_classes = th_probs.size(1);
+
+    auto decoder = decoder_pool[key];
+    // std::vector<std::vector<double>> inputs;
+    auto prob_accessor = th_probs.accessor<float, 2>();
+    // auto seq_len_accessor = th_seq_lens.accessor<int, 1>();
+
+    // for (int b=0; b < batch_size; ++b) {
+        // avoid a crash by ensuring that an erroneous seq_len doesn't have us try to access memory we shouldn't
+    int seq_len = std::min(th_seq_len, (int)max_time);
+    std::vector<std::vector<double>> input (seq_len, std::vector<double>(num_classes));
+    for (int t=0; t < seq_len; ++t) {
+        for (int n=0; n < num_classes; ++n) {
+            float val = prob_accessor[t][n];
+            input[t][n] = val;
+        }
+    }
+        // inputs.push_back(temp);
+    // }
+
+    decoder->next(input);
+
+    std::vector<std::pair<double, Output>> results = decoder->decode();
+
+    // std::vector<std::vector<std::pair<double, Output>>> batch_results =
+    // ctc_beam_search_decoder_batch(inputs, new_vocab, beam_size, num_processes, cutoff_prob, cutoff_top_n, blank_id, log_input, ext_scorer);
+    auto outputs_accessor =  th_output.accessor<int, 2>();
+    auto timesteps_accessor =  th_timesteps.accessor<int, 2>();
+    auto scores_accessor =  th_scores.accessor<float, 1>();
+    auto out_length_accessor =  th_out_length.accessor<int, 1>();
+
+
+    // for (int b = 0; b < batch_results.size(); ++b){
+    // std::vector<std::pair<double, Output>> results = batch_results[b];
+    for (int p = 0; p < results.size();++p){
+        std::pair<double, Output> n_path_result = results[p];
+        Output output = n_path_result.second;
+        std::vector<int> output_tokens = output.tokens;
+        std::vector<int> output_timesteps = output.timesteps;
+        for (int t = 0; t < output_tokens.size(); ++t){
+            outputs_accessor[p][t] =  output_tokens[t]; // fill output tokens
+            timesteps_accessor[p][t] = output_timesteps[t];
+        }
+        scores_accessor[p] = n_path_result.first;
+        out_length_accessor[p] = output_tokens.size();
+    }
+    // }ZZ
+    return 1;
+}
+
+int stream_decoder_finalize(string key)
+{
+    delete decoder_pool[key];
+    decoder_pool.erase(key);
 }
 
 int beam_decode(at::Tensor th_probs,
@@ -90,6 +185,7 @@ int beam_decode(at::Tensor th_probs,
     }
     return 1;
 }
+
 
 int paddle_beam_decode(at::Tensor th_probs,
                        at::Tensor th_seq_lens,
@@ -174,4 +270,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("get_max_order", &get_max_order, "get_max_order");
   m.def("get_dict_size", &get_dict_size, "get_max_order");
   m.def("reset_params", &reset_params, "reset_params");
+  m.def("stream_decoder_init", &stream_decoder_init, "stream_decoder_init");
+  m.def("stream_decoder_feed", &stream_decoder_feed, "stream_decoder_feed");
+  m.def("stream_decoder_finalize", &stream_decoder_finalize, "stream_decoder_finalize");
 }
