@@ -7,7 +7,7 @@ from torch.utils.cpp_extension import BuildExtension
 
 this_file = os.path.dirname(__file__)
 
-
+os.environ['CFLAGS'] ='-w'
 # monkey-patch for parallel compilation
 # See: https://stackoverflow.com/a/13176803
 def parallelCCompile(self,

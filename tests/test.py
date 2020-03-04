@@ -61,6 +61,10 @@ class TestDecoders(unittest.TestCase):
         decoder = ctcdecode.CTCBeamDecoder(self.vocab_list, beam_width=self.beam_size,
                                            blank_id=self.vocab_list.index('_'))
         beam_result, beam_scores, timesteps, out_seq_len = decoder.decode(probs_seq)
+        print("beam", beam_result)
+        print("score", beam_scores)
+        print("timesteps", timesteps) 
+        print("out_seq_len", out_seq_len)
         output_str = self.convert_to_string(beam_result[0][0], self.vocab_list, out_seq_len[0][0])
         self.assertEqual(output_str, self.beam_search_result[0])
 

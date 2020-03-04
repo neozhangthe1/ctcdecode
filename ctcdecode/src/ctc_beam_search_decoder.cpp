@@ -38,7 +38,7 @@ DecoderState::DecoderState(const std::vector<std::string> &vocabulary,
   } else {
     space_id = std::distance(vocabulary.begin(), it);
   }
-  printf("space_id %d\n", space_id);
+  // printf("space_id %d\n", space_id);
 
   // init prefixes' root
   root.score = root.log_prob_b_prev = 0.0;

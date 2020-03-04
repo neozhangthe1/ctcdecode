@@ -7,9 +7,12 @@
 #include "scorer.h"
 #include "ctc_beam_search_decoder.h"
 #include "utf8.h"
-
+#include "ThreadPool.h"
+#include <future>
+#include <thread>
 
 std::map<string, DecoderState*> decoder_pool;
+ThreadPool threadpool(30);
 
 
 int utf8_to_utf8_char_vec(const char* labels, std::vector<std::string>& new_vocab) {
@@ -27,16 +30,22 @@ int utf8_to_utf8_char_vec(const char* labels, std::vector<std::string>& new_voca
     while (str_i < end);
 }
 
-int stream_decoder_init(string key,
-                        const char* labels,
-                        int vocab_size,
-                        size_t beam_size,
-                        size_t num_processes,
-                        double cutoff_prob,
-                        size_t cutoff_top_n,
-                        size_t blank_id,
-                        bool log_input,
-                        void *scorer)
+std::vector<std::pair<double, Output>> feed(const std::vector<std::vector<double>> input, string key) {
+    auto decoder = decoder_pool[key];
+    decoder->next(input);
+    return decoder->decode();
+}
+
+void init(string key,
+            const char* labels,
+            int vocab_size,
+            size_t beam_size,
+            size_t num_processes,
+            double cutoff_prob,
+            size_t cutoff_top_n,
+            size_t blank_id,
+            bool log_input,
+            void *scorer)
 {
     std::vector<std::string> new_vocab;
     utf8_to_utf8_char_vec(labels, new_vocab);
@@ -48,6 +57,21 @@ int stream_decoder_init(string key,
     auto decoder = new DecoderState (new_vocab, beam_size, cutoff_prob, cutoff_top_n, blank_id,
                         log_input, ext_scorer);
     decoder_pool.insert(std::make_pair(key, decoder));
+}
+
+int stream_decoder_init(string key,
+                        const char* labels,
+                        int vocab_size,
+                        size_t beam_size,
+                        size_t num_processes,
+                        double cutoff_prob,
+                        size_t cutoff_top_n,
+                        size_t blank_id,
+                        bool log_input,
+                        void *scorer)
+{
+    threadpool.enqueue(init, key, labels, vocab_size, beam_size, num_processes, cutoff_prob, cutoff_top_n, blank_id,
+                        log_input, scorer).get();
     return 1;
 }
 
@@ -59,17 +83,18 @@ int stream_decoder_feed(string key,
                         at::Tensor th_scores,
                         at::Tensor th_out_length)
 {
+    // printf("feed %s\n", key.c_str());
     const int64_t max_time = th_probs.size(0);
     // const int64_t batch_size = th_probs.size(0);
     const int64_t num_classes = th_probs.size(1);
+    // printf("the_seq_len %d, max_time %d\n", th_seq_len, (int)max_time);
+    // printf("use decoder %s %d\n", key.c_str(), decoder_pool[key]);
 
-    auto decoder = decoder_pool[key];
     // std::vector<std::vector<double>> inputs;
     auto prob_accessor = th_probs.accessor<float, 2>();
     // auto seq_len_accessor = th_seq_lens.accessor<int, 1>();
-
     // for (int b=0; b < batch_size; ++b) {
-        // avoid a crash by ensuring that an erroneous seq_len doesn't have us try to access memory we shouldn't
+    // avoid a crash by ensuring that an erroneous seq_len doesn't have us try to access memory we shouldn't
     int seq_len = std::min(th_seq_len, (int)max_time);
     std::vector<std::vector<double>> input (seq_len, std::vector<double>(num_classes));
     for (int t=0; t < seq_len; ++t) {
@@ -78,12 +103,8 @@ int stream_decoder_feed(string key,
             input[t][n] = val;
         }
     }
-        // inputs.push_back(temp);
-    // }
 
-    decoder->next(input);
-
-    std::vector<std::pair<double, Output>> results = decoder->decode();
+    auto results = threadpool.enqueue(feed, input, key).get();
 
     // std::vector<std::vector<std::pair<double, Output>>> batch_results =
     // ctc_beam_search_decoder_batch(inputs, new_vocab, beam_size, num_processes, cutoff_prob, cutoff_top_n, blank_id, log_input, ext_scorer);
@@ -107,7 +128,8 @@ int stream_decoder_feed(string key,
         scores_accessor[p] = n_path_result.first;
         out_length_accessor[p] = output_tokens.size();
     }
-    // }ZZ
+    // }
+    // printf("finish decode %s\n", key.c_str());
     return 1;
 }
 
